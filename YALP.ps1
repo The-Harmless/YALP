@@ -8,11 +8,15 @@ using System.Threading.Tasks;
 using System.IO;
 using System.Text.RegularExpressions;
 using System.Collections.Concurrent;
+using System.Security.Cryptography;
 
 namespace faster
 {
+    static class GlobalOut {
+        public static string OutDir = "";
+    }
     public class Q
-    { 
+    {
         public EventLogReader Qlocal(string Path, string Query)
         {
             var q = Query;
@@ -28,6 +32,27 @@ namespace faster
                 var lost = new EventLogReader("");
                 return lost;
             }
+        }
+
+        public static string Hash(string filename)
+        {
+            using (var md5 = MD5.Create())
+            {
+                using (var stream = File.OpenRead(filename))
+                {
+                    var hash = md5.ComputeHash(stream);
+                    return BitConverter.ToString(hash).Replace("-", "").ToLowerInvariant();
+                }
+            }
+        }
+
+        public string MID(EventLogReader log)                                               //Machine name
+        {
+            string machine = "";
+            int i = 0;
+            for (EventRecord eInst = log.ReadEvent(); i != 1; eInst = log.ReadEvent())
+            { machine = eInst.MachineName; i++; }
+            return machine;
         }
 
         public IEnumerable<int> UID(EventLogReader log)                                     //Distinct Event IDs in a log
@@ -51,24 +76,31 @@ namespace faster
             return setX;
         }
 
-        public void proof(string path, ICollection<string> Xmls, string code, string d)     //Muti-Threaded High Level Parse
-        {        
+        public void Proof(string path, ICollection<string> Xmls, string code, string d, string compu)     //Muti-Threaded High Level Parse
+        {
             ConcurrentBag<string> Final = new ConcurrentBag<string>();
             var head = Xmls.ElementAt(0);
-            string source = path.Substring(0, path.Length - 5) + "_" + code + ".csv";
             string dataH = "\"";
 
-            IDictionary<string, string> HEAD = Q.Parse(head);
+            IDictionary<string, string> HEAD = Q.Parse(head, compu);
             foreach (string f in HEAD.Keys) { dataH += f + "\"" + d + "\""; }
             dataH = dataH.Substring(0, dataH.Length - 2);
+            string pathdir = "";
+            //string comput = compu.Replace(".","_");    //left over from parsing out machine name with MID now does hash instead
+            if (!(GlobalOut.OutDir == "")) { pathdir = GlobalOut.OutDir; }
+            else { pathdir = path.Substring(0, path.LastIndexOf("\\")); }
+            string logfile = path.Split('\\').Last();
+            logfile = logfile.Split('.').First();
+            string source = pathdir + "\\" + compu + "_" + logfile + "_" + code + ".csv";
 
             int k = 0;
-            Parallel.ForEach(Xmls, (currentfile) =>
-           {
-                IDictionary<string, string> FINALLY = Q.Parse(currentfile);
+            var options = new ParallelOptions() { MaxDegreeOfParallelism = 400 };
+            Parallel.ForEach(Xmls, options ,(currentfile) =>
+            {
+                IDictionary<string, string> FINALLY = Q.Parse(currentfile, compu);
                 string data = "\"";
                 foreach (string f in FINALLY.Values) { data += f + "\"" + d + "\""; }
-                data = data.Replace("  "," ");
+                data = data.Replace("  ", " ");
                 data = data.Replace("\t", "");
                 data = data.Replace("\r", "");
                 data = data.Replace("\n", "_");
@@ -79,13 +111,13 @@ namespace faster
             //path += source + "_" + code + ".csv";
             List<string> hope = Final.ToList();
             var old = hope[0];
-            hope.Insert(0,dataH);
+            hope.Insert(0, dataH);
 
-            Q.write(source, hope, false);
+            Q.Write(source, hope, false);
         }
 
 
-        public static void write(string path, List<string> content, bool append = false)
+        public static void Write(string path, List<string> content, bool append = false)
         {
             using (TextWriter tw = new StreamWriter(File.Open(path, append ? FileMode.Append : FileMode.Create)))
             {
@@ -96,37 +128,38 @@ namespace faster
             }
         }
 
-        public static IDictionary<string,string> Parse(string XMLmsg)                 //Where the sausage gets made
+        public static IDictionary<string, string> Parse(string XMLmsg, string sHash)       //Where the sausage gets made
         {
             string tagRex = "(<.*?>)|(.+?(?=</|$))";
             Regex findTag = new Regex(tagRex);
             string tabstrip = XMLmsg.Replace("\t", "");
             string carstrip = tabstrip.Replace("\r", "");
             string linstrip = carstrip.Replace("\n", "");
-            XMLmsg = linstrip;                                                       //Strip the junk that breaks CSVs
-            List<string> textList = findTag.Split(XMLmsg).ToList();                  //Split into an array(list) of taggish strings
+            XMLmsg = linstrip;                                                             //Strip the junk that breaks CSVs
+            List<string> textList = findTag.Split(XMLmsg).ToList();                        //Split into an array(list) of taggish strings
             List<string> less = new List<string>();
+            List<string> errors = new List<string>();
             IDictionary<string, string> keyVP = new Dictionary<string, string>();
-            for (int i = 0; i < textList.Count; i++)                                 //Remove blanks from the list of taggish items
+            for (int i = 0; i < textList.Count; i++)                                       //Remove blanks from the list of taggish items
             {
                 if (textList[i] != "") { less.Add(textList[i]); }
             }
-            for (int j = 0; j < less.Count; j++)                                     //j will be the index in the list
+            int Dindex = 1;
+            for (int j = 0; j < less.Count; j++)                                           //j will be the index in the list
             {
                 if (less[j].Length > 0)                                                      //not empty...
                 {
                     if (less[j].Substring(0, 1) == "<" && less[j].Substring(0, 2) != "</")   //possible open tag
                     {
-                        if (less[j].Substring(less[j].Length - 2) == "/>")           //isnt a close tag
+                        if (less[j].Substring(less[j].Length - 2) == "/>")                 //isnt a close tag
                         {
-                            int count = less[j].Count(x => x == '=');                //looking for mix of attribute values
-                            switch (count)                                           // i.e. <Data Name='SubjectUserSid'>
+                            int count = less[j].Count(x => x == '=');                      //looking for mix of attribute values
+                            switch (count)                                                 // i.e. <Data Name='SubjectUserSid'>
                             {
-                                case 0:                                              // empty value add KvP of Name and empty string
-                                    //Console.WriteLine("Empty Tag: " + less[j]);
+                                case 0:                                                    // empty value add KvP of Name and empty string
                                     keyVP.Add(less[j].Substring(1, (less[j].Length - 3)), "");
                                     break;
-                                case 1:                                              // MS Timedate stamp, always UTC, epoch added for ELK/SPLUNK
+                                case 1:                                                    // MS Timedate stamp, always UTC, epoch added for ELK/SPLUNK
                                     if (less[j].Substring(1, 11) == "TimeCreated")
                                     {
                                         //Console.WriteLine("Time Tag Attribute: " + less[j]);
@@ -137,7 +170,7 @@ namespace faster
                                         var epoc = val0 + "T" + val01 + "Z";
                                         var dtob = DateTime.Parse(epoc);
                                         var epocMs = (dtob - epoch).TotalMilliseconds;
-                                        keyVP.Add("Epoch",epocMs.ToString());
+                                        keyVP.Add("Epoch", epocMs.ToString());
                                         keyVP.Add("DateCreated", val0);
                                         keyVP.Add("TimeCreated", val01);
                                         break;
@@ -150,9 +183,8 @@ namespace faster
                                         string Data2 = less[j].Substring((split + 2), dataLen);
                                         keyVP.Add(Head2, Data2);
                                     }
-                                    goto default;
-                                case 2:                                                              // i.e. <Execution ProcessID='4' ThreadID='96'/>
-                                    //Console.WriteLine("Multi Attribute Value Set: " + less[j]);
+                                    break;
+                                case 2:                                                    // i.e. <Execution ProcessID='4' ThreadID='96'/>
                                     var ndx1 = less[j].IndexOf("=");
                                     var ndx2 = less[j].LastIndexOf("=");
                                     var pad = ndx2 - ndx1;
@@ -166,9 +198,25 @@ namespace faster
                                     keyVP.Add(val1, val1val);
                                     keyVP.Add(val2, val2val);
                                     break;
-
+                                case 3:                                                     // i.e. <Provider EventSourceName="Service Control Manager" Guid="{555908d1-a6d7-4695-8e1e-26931d2012f4}" Name="Service Control Manager"/>
+                                    var split1 = less[j].IndexOf("\' ", 0) + 2;
+                                    var split2 = less[j].IndexOf("\' ", split1 + 1) + 2;
+                                    var seg1 = less[j].Substring(1, split1 - 2);
+                                    var seg2 = less[j].Substring(split1, split2 - 1 - split1);
+                                    var seg3 = less[j].Substring(split2, less[j].Length - 2 - split2);
+                                    var k1 = seg1.Substring(0, seg1.IndexOf("=", 0));
+                                    var v1 = seg1.Substring(seg1.IndexOf("=", 0) + 1, seg1.Length - seg1.IndexOf("=", 0) - 1);
+                                    var k2 = seg2.Substring(0, seg2.IndexOf("=", 0));
+                                    var v2 = seg2.Substring(seg2.IndexOf("=", 0) + 1, seg2.Length - seg2.IndexOf("=", 0) - 1);
+                                    var k3 = seg3.Substring(0, seg3.IndexOf("=", 0));
+                                    var v3 = seg3.Substring(seg3.IndexOf("=", 0) + 1, seg3.Length - seg3.IndexOf("=", 0) - 1);
+                                    keyVP.Add(k1, v1);
+                                    keyVP.Add(k2, v2);
+                                    keyVP.Add(k3, v3);
+                                    //var check = 0;
+                                    break;
                                 default:
-                                    Console.WriteLine("Broken Logic on: " + less[j]);
+                                    //System.Console.WriteLine(less[j]);
                                     break;
                             }
                         }
@@ -186,29 +234,39 @@ namespace faster
                             string Head = less[j].Substring(12, less[j].Length - 14);
                             string Data = less[j + 1];
                             if (less[j + 1] == "</Data>") { Data = ""; }
-                            keyVP.Add(Head, Data);
+                            keyVP.Add((Dindex + "_" + Head), Data);
+                            Dindex++;
                         }
                         else if (less[j].Length == (less[j + 2].Length - 1) && less[j].Substring(1) == less[j + 2].Substring(2))   //tags for an element with a value
                         {
                             var place = less[j].Substring(1, (less[j].Length - 2));
-                            if (keyVP.ContainsKey(place)) { place = j + "_" + place; }
+                            if (keyVP.ContainsKey(place)) { place = Dindex + "_" + place; Dindex++; }
                             keyVP.Add(place, less[j + 1]);
                         }
                         else if (less[j].Length > 10)                                                                             //incase multiple data fields(this happens alot)
-                        { if (less[j].Substring(0, 6) == "<Data>" && less[j].Substring(less[j].Length - 8) == "<Data/>")
+                        {
+                            if (less[j].Substring(0, 6) == "<Data>" && less[j].Substring(less[j].Length - 8) == "<Data/>")
                             {
-                                keyVP.Add(j + "_Data", (less[j].Substring(7, (less[j].Length - 13))));
+                                keyVP.Add(Dindex + "_Data", (less[j].Substring(7, (less[j].Length - 13))));
+                                Dindex++;
                             }
                         }
                         else if (less[j] == "<Data/>")
                         {
-                            keyVP.Add(j + "_Data", "");
+                            keyVP.Add(Dindex + "_Data", "");
+                            Dindex++;
+                        }
+                        else
+                        {
+                            keyVP.Add(Dindex + "_Data", less[j]);
+                            Dindex++;
                         }
                     }
                 }
             }
+            keyVP.Add("Source_Hash", sHash);
             return keyVP;
-            
+
         }
     }
 
@@ -223,7 +281,7 @@ Add-Type -TypeDefinition $Source -Language CSharp
 ####       Parameters
 ################################################################################
 
-$PathLog = "C:\Users\Beastly\Desktop\Desk\misc\teamV 1\logs\"
+$PathLog = "C:\Path\to\logs\"
 [string]$Delimeter = "|"
 
 ################################################################################
@@ -254,13 +312,13 @@ $fast = New-Object -TypeName faster.Q
 foreach($Log in $Collection)
 {
     if($Log.Extension -like ".evtx"){                    ## Only logs
+    $compu = Get-FileHash $Log.FullName.ToString() -Algorithm MD5
     $reader = $fast.Qlocal($Log.FullName,"*");
     [int[]]$codes = $fast.UID($reader);
     foreach($c in $codes)
     {
-        $Xmls = $fast.PullX($Log.FullName,$c)
-        $dict = $fast.proof($Log.FullName, $Xmls, $c.toString(), $Delimeter)
+        $Xmls = $fast.PullX($Log.FullName.ToString(),$c)
+        $dict = $fast.Proof($Log.FullName.ToString(), $Xmls, $c.toString(), $Delimeter, $compu.Hash.ToString())
         $total += $Xmls.Count;
     }}
 }
-
